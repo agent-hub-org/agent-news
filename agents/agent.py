@@ -3,9 +3,10 @@ import os
 import re
 from datetime import datetime, timezone
 
+import asyncio
 from agent_sdk.agents import BaseAgent
 from agent_sdk.checkpoint import AsyncMongoDBSaver
-from database.memory import get_memories, save_memory
+from agent_sdk.database.memory import get_memories, save_memory
 
 logger = logging.getLogger("agent_news.agent")
 
@@ -175,13 +176,14 @@ _TRIVIAL_FOLLOWUPS: frozenset[str] = frozenset({
 })
 
 
-def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
+async def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
                             user_id: str | None = None) -> str:
     """Build dynamic context block (date, memories, format instructions) to prepend to the user query."""
     mem_key = user_id or session_id
+    mem_err: str | None = None
     # Skip Mem0 search for trivial follow-ups — "Yes" has no semantic content to match against.
     if query.strip().lower() not in _TRIVIAL_FOLLOWUPS and len(query.strip()) > 10:
-        memories = get_memories(user_id=mem_key, query=query)
+        memories, mem_err = await asyncio.to_thread(get_memories, user_id=mem_key, query=query)
     else:
         memories = []
 
@@ -202,6 +204,10 @@ def _build_dynamic_context(session_id: str, query: str, response_format: str | N
         )
         logger.info("Injected %d memories into context for session='%s'", len(memories), session_id)
 
+    if mem_err:
+        parts.append(f"Note: {mem_err}")
+        logger.warning("Mem0 degradation for session='%s': %s", session_id, mem_err)
+
     context_block = "\n\n".join(parts)
     return f"[CONTEXT]\n{context_block}\n[/CONTEXT]\n\n"
 
@@ -212,7 +218,7 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query called — session='%s', user='%s', query='%s', model='%s'",
                 session_id, user_id or "anonymous", query[:100], model_id or "default")
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
+    dynamic_context = await _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
 
     system_prompt = _build_system_prompt(response_format)
@@ -230,14 +236,14 @@ async def run_query(query: str, session_id: str = "default",
     return result
 
 
-def create_stream(query: str, session_id: str = "default",
+async def create_stream(query: str, session_id: str = "default",
                   response_format: str | None = None, model_id: str | None = None,
                   user_id: str | None = None):
     """Create a StreamResult for the query. Returns the stream object directly."""
     logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s'",
                 session_id, user_id or "anonymous", query[:100], model_id or "default")
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
+    dynamic_context = await _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
     system_prompt = _build_system_prompt(response_format)
     agent = create_agent()
