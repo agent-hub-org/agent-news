@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
@@ -126,6 +127,23 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
     "detailed": "",
 }
 
+def _fix_flash_card_format(text: str) -> str:
+    """Post-process flash card responses to enforce consistent ### heading format."""
+    text = re.sub(r'^## (?!#)', '### ', text, flags=re.MULTILINE)
+    text = re.sub(r'^#### ', '### ', text, flags=re.MULTILINE)
+    first_card = re.search(r'^### ', text, re.MULTILINE)
+    if first_card:
+        text = text[first_card.start():]
+    card_count = len(re.findall(r'^### ', text, re.MULTILINE))
+    if card_count < 3:
+        logger.warning("Flash card response has only %d cards", card_count)
+    return text
+
+def _build_system_prompt(response_format: str | None = None) -> str:
+    fmt = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
+    if fmt:
+        return SYSTEM_PROMPT + "\n" + fmt
+    return SYSTEM_PROMPT
 
 def _get_checkpointer() -> AsyncMongoDBSaver:
     global _checkpointer
@@ -184,10 +202,6 @@ def _build_dynamic_context(session_id: str, query: str, response_format: str | N
         )
         logger.info("Injected %d memories into context for session='%s'", len(memories), session_id)
 
-    format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
-    if format_instruction:
-        parts.append(format_instruction.strip())
-
     context_block = "\n\n".join(parts)
     return f"[CONTEXT]\n{context_block}\n[/CONTEXT]\n\n"
 
@@ -201,8 +215,14 @@ async def run_query(query: str, session_id: str = "default",
     dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
 
+    system_prompt = _build_system_prompt(response_format)
+
     agent = create_agent()
-    result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+    result = await agent.arun(enriched_query, session_id=session_id, system_prompt=system_prompt, model_id=model_id)
+
+    if response_format == "flash_cards":
+        result["response"] = _fix_flash_card_format(result["response"])
+
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
@@ -219,5 +239,6 @@ def create_stream(query: str, session_id: str = "default",
 
     dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
+    system_prompt = _build_system_prompt(response_format)
     agent = create_agent()
-    return agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+    return agent.astream(enriched_query, session_id=session_id, system_prompt=system_prompt, model_id=model_id)
