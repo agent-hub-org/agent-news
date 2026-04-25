@@ -1,3 +1,6 @@
+from agent_sdk.secrets.akv import load_akv_secrets
+load_akv_secrets()
+
 import asyncio
 import json
 import logging
@@ -31,6 +34,8 @@ limiter = Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from agent_sdk.observability import init_sentry
+    init_sentry("agent-news")
     validate_required_env_vars(
         ["MONGO_URI", "AZURE_AI_FOUNDRY_ENDPOINT", "AZURE_AI_FOUNDRY_API_KEY"],
         "agent-news",
