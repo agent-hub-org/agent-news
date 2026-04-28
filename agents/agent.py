@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 
 import asyncio
 from agent_sdk.agents import BaseAgent
-from agent_sdk.checkpoint import AsyncMongoDBSaver
+from agent_sdk.checkpoint import get_default_checkpointer
 from agent_sdk.database.memory import get_memories, save_memory
+from agent_sdk.utils.text import TRIVIAL_FOLLOWUPS as _TRIVIAL_FOLLOWUPS
 from database.mongo import MongoDB
 
 logger = logging.getLogger("agent_news.agent")
@@ -137,7 +138,6 @@ MCP_SERVERS = {
 }
 
 _agent_instance: BaseAgent | None = None
-_checkpointer: AsyncMongoDBSaver | None = None
 
 RESPONSE_FORMAT_INSTRUCTIONS = {
     "summary": (
@@ -168,17 +168,6 @@ def _build_system_prompt(response_format: str | None = None) -> str:
         return SYSTEM_PROMPT + "\n" + fmt
     return SYSTEM_PROMPT
 
-def _get_checkpointer() -> AsyncMongoDBSaver:
-    global _checkpointer
-    if _checkpointer is None:
-        _checkpointer = AsyncMongoDBSaver.from_conn_string(
-            conn_string=os.getenv("MONGO_URI", "mongodb://localhost:27017"),
-            db_name=os.getenv("MONGO_DB_NAME", "agent_news"),
-            ttl=int(os.getenv("CHECKPOINT_TTL_SECONDS", str(7 * 24 * 3600))),
-        )
-    return _checkpointer
-
-
 def create_agent() -> BaseAgent:
     global _agent_instance
     if _agent_instance is None:
@@ -187,15 +176,9 @@ def create_agent() -> BaseAgent:
             tools=[],
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
-            checkpointer=_get_checkpointer(),
+            checkpointer=get_default_checkpointer(os.getenv("MONGO_DB_NAME", "agent_news")),
         )
     return _agent_instance
-
-
-_TRIVIAL_FOLLOWUPS: frozenset[str] = frozenset({
-    "yes", "no", "sure", "ok", "okay", "please", "yes please",
-    "no thanks", "proceed", "go ahead", "continue", "yeah", "yep",
-})
 
 
 async def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
@@ -274,7 +257,7 @@ async def run_query(query: str, session_id: str = "default",
 
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    save_memory(user_id=user_id or session_id, query=query, response=result["response"])
+    await asyncio.to_thread(save_memory, user_id=user_id or session_id, query=query, response=result["response"])
 
     return result
 
